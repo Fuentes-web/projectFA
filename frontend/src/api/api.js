@@ -1,5 +1,6 @@
 //const API_URL = "http://localhost:8000"; // <-- tu backend FastAPI
-export const API_URL = "https://projectfa.onrender.com";
+export const API_URL = import.meta.env.VITE_API_URL;
+
 
 // Obtener transacciones con filtros
 export async function fetchTransacciones(filters = {}) {
