@@ -1,6 +1,6 @@
 from sqlmodel import Session, select
-from dbmodels import TransactionDB
-from main import Transaction
+from backend.dbmodels import TransactionDB
+from backend.main import Transaction
 
 class TransactionRepository:
 
