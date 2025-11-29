@@ -2,21 +2,11 @@ from datetime import date, datetime
 from abc import ABC, abstractmethod
 from enum import Enum
 import uuid
+from sqlmodel import Session, select
+from dbmodels import TransactionModel, Type, Category
+from database import engine
+from sqlalchemy import func
 
-class Type(str,Enum):
-    INGRESO = "Ingreso"
-    GASTO = "Gasto"
-    
-class Category(str,Enum):
-    ALIMENTACION = "Alimentación"
-    HOGAR = "Hogar"
-    TRANSPORTE = "Transporte"
-    ENTRETENIMIENTO = "Entretenimiento"
-    SALUD = "Salud"
-    OTROS = "Otros"
-    TRABAJO = "Trabajo"
-    EDUCACION = "Educación"
-    
 class Monto:
     def __init__(self,monto):
         if monto<=0:
@@ -158,19 +148,27 @@ class Billetera:
     9.resumen gasto por categoria
     """
     
-    def __init__(self,id:Id, transacciones:dict[Id,Transaction]):
+    def __init__(self,id:Id):
         self.id = id
-        self.transacciones = transacciones
-    
+        self.session = Session(engine)
+                
     @classmethod
     def generate(cls):
-        id = Id.generate()
-        return cls(id,dict())
-            
-    def agregar_transaccion(self,descripcion:Descripcion, monto:Monto, tipo:Tipo, categoria:Category):
-        transaccion = Transaction.generate(descripcion, monto, tipo, categoria)
-        self._validar_transaccion(transaccion,Accion.AGREGAR)
-        self.transacciones[transaccion.id] = transaccion
+        return cls(Id.generate())
+
+                
+    def agregar_transaccion(self, descripcion: Descripcion, monto: Monto, tipo: Tipo, categoria: Category):
+        transaccion_bd = TransactionModel(descripcion=str(descripcion),monto=monto.value,tipo=tipo.value,categoria=categoria.value)
+
+    # Validación: evitar gasto mayor al balance
+        if tipo.value == Type.GASTO and self.balance_actual() < monto.value:
+            raise BalanceNegativoException()
+
+        self.session.add(transaccion_bd)
+        self.session.commit()
+        self.session.refresh(transaccion_bd)
+
+        return transaccion_bd
         
     def _validar_transaccion(self,transaccion :Transaction,accion:Accion):
         if accion == Accion.AGREGAR:
@@ -184,42 +182,90 @@ class Billetera:
         elif accion == Accion.MODIFICAR:
             pass
               
-    def eliminar_transaccion(self,id_transaccion):
-        if id_transaccion not in self.transacciones:
-            raise ValueError("llave incorrecta o no disponible")
-        else:
-            self._validar_transaccion(self.transacciones[id_transaccion],Accion.ELIMINAR)
-            del self.transacciones[id_transaccion]  
+    def eliminar_transaccion(self, id_transaccion: str):
+        trans = self.session.get(TransactionModel, id_transaccion)
+
+        if not trans:
+            raise ValueError("Transacción no encontrada")
+
+        # Validación: si eliminas un ingreso no puede dejar balance negativo
+        if trans.tipo == Type.INGRESO and self.balance_actual() < trans.monto:
+            raise BalanceNegativoException()
+
+        self.session.delete(trans)
+        self.session.commit()
+
     
     def _calcular_balance(self):
-        balance = 0
-        for transaccion in self.transacciones.values():
-            balance += transaccion
-        return balance
+        return self.balance_actual()
+
             
     def balance_actual(self):
-        return self._calcular_balance()
+        ingresos = self.session.exec(
+            select(TransactionModel).where(TransactionModel.tipo == "Ingreso")
+        ).all()
+
+        gastos = self.session.exec(
+            select(TransactionModel).where(TransactionModel.tipo == "Gasto")
+        ).all()
+
+        total_ingresos = sum(t.monto for t in ingresos)
+        total_gastos = sum(t.monto for t in gastos)
+
+        return total_ingresos - total_gastos
+
     
     def total_ingresos(self):
-        total_ingresos = 0
-        for transaccion in self.transacciones.values():
-            if transaccion.tipo == Type.INGRESO:
-                total_ingresos+=transaccion.monto.value
-        return total_ingresos
+        ingresos = self.session.exec(
+            select(TransactionModel).where(TransactionModel.tipo == "Ingreso")).all()
+        return sum(t.monto for t in ingresos)
+
     
     def total_gastos(self):
-        total_gastos = 0
-        for transaccion in self.transacciones.values():
-            if transaccion.tipo == Type.GASTO:
-                total_gastos+=transaccion.monto.value
-        return total_gastos
+        gastos = self.session.exec(
+            select(TransactionModel).where(TransactionModel.tipo == "Gasto")).all()
+        return sum(t.monto for t in gastos)
+
     
     def historial(self):
-        for transaccion in self.transacciones.values():
-            print(self.transacciones[transaccion.id])
+        return self.session.exec(select(TransactionModel)).all()
         
+    def filtrar_por_categoria(self, categoria: Category):
+        return self.session.exec(select(TransactionModel).where(TransactionModel.categoria == categoria.value)).all()
+
+    def filtrar_por_fecha(self, fecha: datetime):
+        return self.session.exec(select(TransactionModel).where(func.date(TransactionModel.fecha) == fecha.date())).all()
+
+    def filtrar_por_rango(self, desde: datetime, hasta: datetime):
+        return self.session.exec(select(TransactionModel).where(TransactionModel.fecha >= desde).where(TransactionModel.fecha <= hasta)).all()
+
+    def filtrar_por_monto(self, minimo=None, maximo=None):
+        query = select(TransactionModel)
+
+        if minimo is not None:
+            query = query.where(TransactionModel.monto >= minimo)
+
+        if maximo is not None:
+            query = query.where(TransactionModel.monto <= maximo)
+
+        return self.session.exec(query).all()
+
+
+    def ordenar_historial(self, por="fecha", ascendente=True):
+        if por not in {"fecha", "monto", "categoria"}:
+            raise ValueError("Campo de orden inválido")
+
+        order_col = getattr(TransactionModel, por)
+
+        if not ascendente:
+            order_col = order_col.desc()
+
+        return self.session.exec(select(TransactionModel).order_by(order_col)).all()
+
+
     def __str__(self):
-        return f"Billetera(transacciones={self.transacciones})"
+        return f"Billetera(id={self.id.value})"
+
     
 #en que carpeta va el codigo de la interfaz de terminal
 if __name__ == "__main__":

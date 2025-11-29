@@ -1,0 +1,47 @@
+/* layout.css */
+
+.layout {
+  display: flex;
+  height: 100vh;
+  background: #f7f7f7;
+}
+
+/* ----- SIDEBAR ----- */
+.sidebar {
+  width: 260px;
+  background: white;
+  border-right: 1px solid #ddd;
+  padding: 20px;
+}
+
+.sidebar-title {
+  font-size: 20px;
+  font-weight: bold;
+  margin-bottom: 25px;
+  color: #333;
+}
+
+.sidebar-links {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+}
+
+.sidebar-links a {
+  text-decoration: none;
+  color: #0077cc;
+  font-size: 17px;
+  padding: 8px;
+  border-radius: 6px;
+}
+
+.sidebar-links a:hover {
+  background: #e9f3ff;
+}
+
+/* ----- CONTENIDO ----- */
+.content {
+  flex: 1;
+  padding: 25px;
+  overflow-y: auto;
+}

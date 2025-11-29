@@ -1,29 +1,36 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Query
 from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
-import uuid
+from sqlmodel import Session, select
+from decimal import Decimal
+from fastapi.middleware.cors import CORSMiddleware
 
-# Importar tus clases
-from clases import Billetera, Descripcion, Monto, Tipo, Category, Type, Id, Transaction, BalanceNegativoException
+from clases import Billetera, Descripcion, Monto, Tipo, Category, Type, Id, BalanceNegativoException
+from dbmodels import TransactionModel
+from database import init_db, get_session
 
 app = FastAPI(title="API de Billetera")
 
-# Modelo Pydantic para crear una transacción
+@app.on_event("startup")
+def on_startup():
+    init_db()
+
+# ---------------------------
+# Pydantic models (API layer)
+# ---------------------------
 class TransactionCreate(BaseModel):
     descripcion: str = Field(..., max_length=50)
     monto: float = Field(..., gt=0)
     tipo: Type
     categoria: Category
 
-# Modelo Pydantic para modificar transacción
 class TransactionUpdate(BaseModel):
     descripcion: Optional[str] = Field(None, max_length=50)
     monto: Optional[float] = Field(None, gt=0)
     tipo: Optional[Type] = None
     categoria: Optional[Category] = None
 
-# Modelo para devolver transacción
 class TransactionOut(BaseModel):
     id: str
     descripcion: str
@@ -32,99 +39,204 @@ class TransactionOut(BaseModel):
     categoria: str
     fecha: datetime
 
-# Crear una billetera global para pruebas
+# ---------------------------
+# Helper
+# ---------------------------
+def txmodel_to_out(tx: TransactionModel) -> TransactionOut:
+    return TransactionOut(
+        id=str(tx.id),
+        descripcion=tx.descripcion,
+        monto=float(tx.monto),
+        tipo=tx.tipo,
+        categoria=tx.categoria,
+        fecha=tx.fecha
+    )
+
+# ---------------------------
+# Create a Billetera instance
+# ---------------------------
+# We'll reuse the service but always set its session from the FastAPI dependency.
 mi_billetera = Billetera.generate()
 
-# Endpoint para agregar transacción
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # puedes limitar esto luego
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ---------------------------
+# Create transaction
+# ---------------------------
 @app.post("/transacciones", response_model=TransactionOut)
-def agregar_transaccion(tx: TransactionCreate):
+def crear_transaccion(tx: TransactionCreate, session: Session = Depends(get_session)):
+    mi_billetera.session = session
     try:
         descripcion = Descripcion(tx.descripcion)
         monto = Monto(tx.monto)
         tipo = Tipo(tx.tipo)
         categoria = tx.categoria
-        mi_billetera.agregar_transaccion(descripcion, monto, tipo, categoria)
-        # Obtener la última transacción agregada
-        transaccion = list(mi_billetera.transacciones.values())[-1]
-        return TransactionOut(
-            id=str(transaccion.id),
-            descripcion=str(transaccion.descripcion),
-            monto=transaccion.monto.value,
-            tipo=transaccion.tipo,
-            categoria=transaccion.categoria.value,
-            fecha=transaccion.fecha
-        )
+
+        nueva = mi_billetera.agregar_transaccion(descripcion, monto, tipo, categoria)
+        # agregar_transaccion devuelve el objeto guardado (TransactionModel)
+        return txmodel_to_out(nueva)
+
     except BalanceNegativoException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# Endpoint para eliminar transacción
+# ---------------------------
+# Get single transaction
+# ---------------------------
+@app.get("/transacciones/{tx_id}", response_model=TransactionOut)
+def obtener_transaccion(tx_id: str, session: Session = Depends(get_session)):
+    tx_db = session.get(TransactionModel, tx_id)
+    if not tx_db:
+        raise HTTPException(status_code=404, detail="Transacción no encontrada")
+    return txmodel_to_out(tx_db)
+
+# ---------------------------
+# Delete transaction
+# ---------------------------
 @app.delete("/transacciones/{tx_id}")
-def eliminar_transaccion(tx_id: str):
+def eliminar_transaccion(tx_id: str, session: Session = Depends(get_session)):
+    mi_billetera.session = session
+    tx_db = session.get(TransactionModel, tx_id)
+    if not tx_db:
+        raise HTTPException(status_code=404, detail="Transacción no encontrada")
+
     try:
-        id_obj = Id.generate_from_string(tx_id)
-        mi_billetera.eliminar_transaccion(id_obj.value)
+        mi_billetera.eliminar_transaccion(tx_id)
         return {"detail": "Transacción eliminada"}
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except BalanceNegativoException as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-# Endpoint para modificar transacción
-@app.put("/transacciones/{tx_id}", response_model=TransactionOut)
-def modificar_transaccion(tx_id: str, tx_update: TransactionUpdate):
-    try:
-        id_obj = Id.generate_from_string(tx_id)
-        if id_obj.value not in mi_billetera.transacciones:
-            raise HTTPException(status_code=404, detail="Transacción no encontrada")
-        
-        transaccion = mi_billetera.transacciones[id_obj.value]
-
-        nueva_descripcion = Descripcion(tx_update.descripcion) if tx_update.descripcion else None
-        nuevo_monto = Monto(tx_update.monto) if tx_update.monto else None
-        nuevo_tipo = Tipo(tx_update.tipo) if tx_update.tipo else None
-        nueva_categoria = tx_update.categoria if tx_update.categoria else None
-
-        transaccion.modificar(nueva_descripcion, nuevo_monto, nuevo_tipo, nueva_categoria)
-        return TransactionOut(
-            id=str(transaccion.id),
-            descripcion=str(transaccion.descripcion),
-            monto=transaccion.monto.value,
-            tipo=transaccion.tipo,
-            categoria=transaccion.categoria.value,
-            fecha=transaccion.fecha
-        )
     except BalanceNegativoException as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# Endpoint para obtener balance actual
+# ---------------------------
+# Update transaction
+# ---------------------------
+@app.put("/transacciones/{tx_id}", response_model=TransactionOut)
+def modificar_transaccion(tx_id: str, tx_update: TransactionUpdate, session: Session = Depends(get_session)):
+    mi_billetera.session = session
+    tx_db = session.get(TransactionModel, tx_id)
+    if not tx_db:
+        raise HTTPException(status_code=404, detail="Transacción no encontrada")
+
+    # Valores actuales
+    old_monto = float(tx_db.monto)
+    old_tipo = tx_db.tipo  # "Ingreso" o "Gasto"
+
+    # Aplicar cambios en memoria
+    if tx_update.descripcion is not None:
+        tx_db.descripcion = tx_update.descripcion
+    if tx_update.monto is not None:
+        tx_db.monto = float(tx_update.monto)
+    if tx_update.tipo is not None:
+        tx_db.tipo = tx_update.tipo.value
+    if tx_update.categoria is not None:
+        tx_db.categoria = tx_update.categoria.value
+
+    # Antes de confirmar, comprobar que la modificación no deja balance negativo
+    # Calculamos el balance sin la transacción original y luego sumamos el efecto de la nueva.
+    # 1) sumar todos los demás ingresos y restar los demás gastos
+    other_txs = session.exec(select(TransactionModel).where(TransactionModel.id != tx_id)).all()
+    total_others = 0.0
+    for t in other_txs:
+        total_others += float(t.monto) if t.tipo == "Ingreso" else -float(t.monto)
+
+    # 2) añadir efecto de la transacción modificada
+    new_effect = float(tx_db.monto) if tx_db.tipo == "Ingreso" else -float(tx_db.monto)
+    projected_balance = total_others + new_effect
+
+    if projected_balance < 0:
+        session.rollback()
+        raise HTTPException(status_code=400, detail="La modificación dejaría el balance en negativo")
+
+    # Commit de la modificación
+    session.add(tx_db)
+    session.commit()
+    session.refresh(tx_db)
+
+    return txmodel_to_out(tx_db)
+
+# ---------------------------
+# Get balance
+# ---------------------------
 @app.get("/balance")
-def balance():
+def obtener_balance(session: Session = Depends(get_session)):
+    mi_billetera.session = session
     return {
         "balance_actual": mi_billetera.balance_actual(),
         "total_ingresos": mi_billetera.total_ingresos(),
         "total_gastos": mi_billetera.total_gastos()
     }
 
-# Endpoint para listar todas las transacciones
+# ---------------------------
+# List / filter / order transactions
+# Supports query params:
+#  - categoria (Category enum name or value)
+#  - desde (ISO datetime string)
+#  - hasta (ISO datetime string)
+#  - min_amount, max_amount (floats)
+#  - sort_by ("fecha","monto","categoria")
+#  - asc (0 or 1)
+# ---------------------------
 @app.get("/transacciones", response_model=List[TransactionOut])
-def historial():
-    return [
-        TransactionOut(
-            id=str(t.id),
-            descripcion=str(t.descripcion),
-            monto=t.monto.value,
-            tipo=t.tipo,
-            categoria=t.categoria.value,
-            fecha=t.fecha
-        )
-        for t in mi_billetera.transacciones.values()
-    ]
+def listar_transacciones(
+    categoria: Optional[Category] = Query(None),
+    desde: Optional[str] = Query(None, description="Fecha desde (ISO)"),
+    hasta: Optional[str] = Query(None, description="Fecha hasta (ISO)"),
+    min_amount: Optional[float] = Query(None),
+    max_amount: Optional[float] = Query(None),
+    sort_by: Optional[str] = Query("fecha", regex="^(fecha|monto|categoria)$"),
+    asc: Optional[int] = Query(1, ge=0, le=1),
+    session: Session = Depends(get_session)
+):
+    query = select(TransactionModel)
 
+    # Categoria
+    if categoria is not None:
+        # categoria puede venir como enum; TransactionModel.categoria guarda el valor (p. ej. "Alimentación")
+        query = query.where(TransactionModel.categoria == categoria.value)
 
+    # Fecha rango
+    if desde is not None:
+        try:
+            dt_desde = datetime.fromisoformat(desde)
+            query = query.where(TransactionModel.fecha >= dt_desde)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Formato 'desde' inválido. Usa ISO (YYYY-MM-DDThh:mm:ss)")
 
+    if hasta is not None:
+        try:
+            dt_hasta = datetime.fromisoformat(hasta)
+            query = query.where(TransactionModel.fecha <= dt_hasta)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Formato 'hasta' inválido. Usa ISO (YYYY-MM-DDThh:mm:ss)")
 
+    # Montos
+    if min_amount is not None:
+        query = query.where(TransactionModel.monto >= min_amount)
+    if max_amount is not None:
+        query = query.where(TransactionModel.monto <= max_amount)
+
+    # Ordenamiento
+    order_col = getattr(TransactionModel, sort_by)
+    if asc == 1:
+        query = query.order_by(order_col)
+    else:
+        query = query.order_by(order_col.desc())
+
+    txs = session.exec(query).all()
+    return [txmodel_to_out(t) for t in txs]
+
+# ---------------------------
+# Health / root
+# ---------------------------
+@app.get("/")
+def root():
+    return {"status": "ok", "service": "billetera"}
 
