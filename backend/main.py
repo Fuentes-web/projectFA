@@ -5,7 +5,6 @@ from datetime import datetime
 from sqlmodel import Session, select
 from decimal import Decimal
 from fastapi.middleware.cors import CORSMiddleware
-
 from clases import Billetera, Descripcion, Monto, Tipo, Category, Type, Id, BalanceNegativoException
 from dbmodels import TransactionModel
 from database import init_db, get_session

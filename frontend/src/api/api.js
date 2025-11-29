@@ -1,4 +1,5 @@
-const API_URL = "http://localhost:8000"; // <-- tu backend FastAPI
+//const API_URL = "http://localhost:8000"; // <-- tu backend FastAPI
+export const API_URL = "https://projectfa.onrender.com";
 
 // Obtener transacciones con filtros
 export async function fetchTransacciones(filters = {}) {
