@@ -26,3 +26,4 @@ export default function Layout() {
     </div>
   );
 }
+//COMENTARIO: He añadido enlaces en el sidebar
